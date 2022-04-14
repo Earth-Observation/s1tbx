@@ -93,6 +93,9 @@ public class InterferogramOp extends Operator {
     @Parameter(defaultValue = "true", label = "Include coherence estimation")
     private boolean includeCoherence = true;
 
+    @Parameter(defaultValue = "false", label = "Include wavenumber")
+    private boolean includeWavenumber = false;
+
     @Parameter(description = "Size of coherence estimation window in Azimuth direction",
             defaultValue = "10",
             label = "Coherence Azimuth Window Size")
@@ -177,6 +180,7 @@ public class InterferogramOp extends Operator {
     private static final String PRODUCT_SUFFIX = "_Ifg";
     private static final String FLAT_EARTH_PHASE = "flat_earth_phase";
     private static final String TOPO_PHASE = "topo_phase";
+    private static final String WAVENUMBER_BAND = "wavenumber";
     private static final String COHERENCE = "coherence";
     private static final String ELEVATION = "elevation";
     private static final String LATITUDE = " orthorectifiedLat";
@@ -515,6 +519,17 @@ public class InterferogramOp extends Operator {
                 container.addBand(COHERENCE, coherenceBand.getName());
                 coherenceBand.setUnit(Unit.COHERENCE);
                 targetBandNames.add(coherenceBand.getName());
+            }
+
+            if (includeWavenumber) {
+                final String wavenumberBandName = WAVENUMBER_BAND;
+                final Band targetBandWavenumber = targetProduct.addBand(wavenumberBandName, ProductData.TYPE_FLOAT32);
+                targetBandWavenumber.setNoDataValueUsed(true);
+                targetBandWavenumber.setNoDataValue(master.realBand.getNoDataValue());
+                container.addBand(WAVENUMBER_BAND, targetBandWavenumber.getName());
+                targetBandWavenumber.setUnit("radians/meter");
+                targetBandWavenumber.setDescription("Vertical wavenumber");
+                targetBandNames.add(targetBandWavenumber.getName());
             }
 
             if (subtractTopographicPhase && OUTPUT_PHASE) {
@@ -1097,6 +1112,64 @@ public class InterferogramOp extends Operator {
             }
         }
     }
+
+    private void saveWavenumber(final int x0, final int xN, final int y0, final int yN, final double[][] Wavenumber,
+                               final ProductContainer product, final Map<Band, Tile> targetTileMap) {
+
+        final Band WavenumberBand = targetProduct.getBand(product.getBandName(WAVENUMBER_BAND));
+        final Tile WavenumberTile = targetTileMap.get(WavenumberBand);
+        final ProductData WavenumberData = WavenumberTile.getDataBuffer();
+        final TileIndex tgtIndex = new TileIndex(WavenumberTile);
+
+        for (int y = y0; y <= yN; y++) {
+            tgtIndex.calculateStride(y);
+            final int yy = y - y0;
+            for (int x = x0; x <= xN; x++) {
+                final int tgtIdx = tgtIndex.getIndex(x);
+                final int xx = x - x0;
+                WavenumberData.setElemFloatAt(tgtIdx, (float)Wavenumber[yy][xx]);
+            }
+        }
+    }
+    
+    private void computeWavenumber(final Tile elevationTile, final Tile wavenumberTile,
+                                   final Rectangle rectangle, final SLCImage slcImageSlave,
+                                   final Orbit orbitSlave) throws Exception {
+
+        final int x0 = rectangle.x;
+        final int y0 = rectangle.y;
+        final int w = rectangle.width;
+        final int h = rectangle.height;
+        final int xMax = x0 + w;
+        final int yMax = y0 + h;
+
+        final ProductData targetBufferWavenumber = wavenumberTile.getDataBuffer();
+        final ProductData sourceBufferElevation = elevationTile.getDataBuffer();
+
+        final TileIndex elevationIndex = new TileIndex(elevationTile);
+        final TileIndex targetIndex = new TileIndex(wavenumberTile);
+
+        for (int y = y0; y < yMax; y++) {
+            elevationIndex.calculateStride(y);
+            targetIndex.calculateStride(y);
+            for (int x = x0; x < xMax; x++) {
+                final int targetIdx = targetIndex.getIndex(x);
+                final int elevationIdx = elevationIndex.getIndex(x);
+                final double heightWrtEllipsoid = sourceBufferElevation.getElemDoubleAt(elevationIdx);
+
+                // Compute vertical wavenumber
+                final Point xyzPosition = orbitMaster.lph2xyz(y, x, heightWrtEllipsoid, slcImageMaster);
+                final Point xyzPositionUp = orbitMaster.lph2xyz(y, x, heightWrtEllipsoid + 1, slcImageMaster);
+                final double slaveOneWayRangeTime = orbitSlave.xyz2t(xyzPosition, slcImageSlave).x;
+                final double slaveOneWayRangeTimeUp = orbitSlave.xyz2t(xyzPositionUp, slcImageSlave).x;
+                final double forwardDifference = Constants.lightSpeed * (slaveOneWayRangeTimeUp - slaveOneWayRangeTime);
+                final double wavenumber = -4 * Constants.PI / slcImageSlave.getRadarWavelength() * forwardDifference;
+
+                targetBufferWavenumber.setElemDoubleAt(targetIdx, wavenumber);
+            }
+        }
+    }
+
 
     private void saveFlatEarthPhase(final int x0, final int xN, final int y0, final int yN, final DoubleMatrix refPhase,
                                     final ProductContainer product, final Map<Band, Tile> targetTileMap) {
